@@ -25,7 +25,7 @@ Cocok digunakan sebagai fondasi untuk dashboard, admin panel, landing page, maup
 
 | Kategori | Teknologi |
 |---|---|
-| **Framework** | [Next.js 16](https://nextjs.org/) (App Router) |
+| **Framework** | [Next.js 16](https://nextjs.org/) (App Router) [Lebih tepatnya menggunakan 16.1.6 untuk menghindari masalah url cache] |
 | **Library UI** | [React 19](https://react.dev/) |
 | **Bahasa** | [TypeScript 5](https://www.typescriptlang.org/) |
 | **Styling** | [Tailwind CSS v4](https://tailwindcss.com/) + `tailwind-merge` + `tw-animate-css` |
