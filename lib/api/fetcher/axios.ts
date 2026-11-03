@@ -1,7 +1,11 @@
+"use client";
+
 import { CreateAxiosDefaults, isAxiosError, default as realAxios } from "axios";
 import { apiUrls } from "../apiUrls";
-import { TokenResponse } from "../auth";
-import { APIErrorResponse, APISingleResponse } from "../types";
+import { urls } from "@/lib/routes";
+import { APISingleResponse } from "@/lib/hooks";
+import { TokenResponse } from "@/lib/auth";
+import { APIErrorResponse } from "../types";
 
 export const axiosConfig: CreateAxiosDefaults = {
   baseURL: process.env.NEXT_PUBLIC_API_BASE_URL,
@@ -15,111 +19,130 @@ export const axios = realAxios.create(axiosConfig);
 
 const ACCESS_TOKEN = "accessToken";
 const REFRESH_TOKEN = "refreshToken";
-// const forceLogout = async (id?: string) => {
 
-//   try {
-//     const rt = localStorage.getItem(REFRESH_TOKEN)
+const forceLogout = async () => {
+  try {
+    const rt = localStorage.getItem(REFRESH_TOKEN);
 
-//     localStorage.removeItem(ACCESS_TOKEN)
-//     localStorage.removeItem(REFRESH_TOKEN)
-//     if (window === undefined) {
-//       throw new CustomError('Cannot redirect, due to handle by server side')
-//     }
+    localStorage.removeItem(ACCESS_TOKEN);
+    localStorage.removeItem(REFRESH_TOKEN);
 
-//     await axios.post(apiUrls.logout(), { refreshToken: rt })
+    if (typeof window === "undefined") {
+      return;
+    }
 
-//     window.location.href = urls.tableId(id as string)
-//   } catch (e) {
-//     if (e instanceof CustomError) {
-//       throw e
-//     }
+    // Only attempt logout API call if we actually had a refresh token
+    if (rt) {
+      await axios.post(apiUrls.logout(), { refreshToken: rt }).catch(() => {});
+    }
 
-//     window.location.href = urls.tableId(id as string)
-//   }
-// }
+    window.location.href = urls.login();
+  } catch {
+    if (typeof window !== "undefined") {
+      window.location.href = urls.login();
+    }
+  }
+};
 
-const fetchToken = async () => {
-  const at = localStorage.getItem(ACCESS_TOKEN);
+let isRefreshing = false;
+let failedQueue: {
+  resolve: (token: string) => void;
+  reject: (error: any) => void;
+}[] = [];
+
+const processQueue = (error: any, token: string | null = null) => {
+  failedQueue.forEach((prom) => {
+    if (error) {
+      prom.reject(error);
+    } else {
+      prom.resolve(token!);
+    }
+  });
+  failedQueue = [];
+};
+
+const fetchToken = async (): Promise<string> => {
   const rt = localStorage.getItem(REFRESH_TOKEN);
 
-  await navigator.locks.request(
-    "refreshing-token",
-    {
-      mode: "exclusive",
-    },
-    async () => {
-      const latestAT = localStorage.getItem(ACCESS_TOKEN);
-      if (at !== latestAT) {
-        return;
-      }
+  if (!rt) {
+    await forceLogout();
+    throw new Error("No refresh token available");
+  }
 
-      const { data } = await axios.put<APISingleResponse<TokenResponse>>(
-        apiUrls.refreshToken(),
-        { refreshToken: rt },
-      );
+  if (isRefreshing) {
+    return new Promise((resolve, reject) => {
+      failedQueue.push({ resolve, reject });
+    });
+  }
 
-      const fetchedToken = data.data;
+  isRefreshing = true;
 
-      localStorage.setItem(ACCESS_TOKEN, fetchedToken.accessToken);
-      localStorage.setItem(REFRESH_TOKEN, fetchedToken.refreshToken);
-    },
-  );
+  try {
+    const { data } = await axios.post<APISingleResponse<TokenResponse>>(
+      apiUrls.refreshToken(),
+      { refreshToken: rt },
+    );
+
+    const fetchedToken = data.data;
+
+    localStorage.setItem(ACCESS_TOKEN, fetchedToken.accessToken);
+    localStorage.setItem(REFRESH_TOKEN, fetchedToken.refreshToken);
+
+    processQueue(null, fetchedToken.accessToken);
+    return fetchedToken.accessToken;
+  } catch (error) {
+    processQueue(error, null);
+    await forceLogout();
+    throw error;
+  } finally {
+    isRefreshing = false;
+  }
 };
 
 axios.interceptors.request.use((config) => {
-  config.headers.Authorization = `Bearer ${localStorage.getItem(ACCESS_TOKEN)}`;
-
+  const token = localStorage.getItem(ACCESS_TOKEN);
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
   return config;
 });
 
 axios.interceptors.response.use(
-  (config) => {
-    return config;
-  },
+  (config) => config,
   async (e) => {
+    if (!isAxiosError<APIErrorResponse>(e)) {
+      return Promise.reject(e);
+    }
+
+    const prevReq = e.config;
+    if (!prevReq) {
+      return Promise.reject(e);
+    }
+
+    if (e.response?.status !== 401) {
+      if (
+        prevReq.url === apiUrls.refreshToken() &&
+        e.response?.status === 422
+      ) {
+        await forceLogout();
+      }
+      return Promise.reject(e);
+    }
+
+    if (
+      prevReq.url === apiUrls.logout() ||
+      prevReq.url === apiUrls.login() ||
+      prevReq.url === apiUrls.refreshToken()
+    ) {
+      return Promise.reject(e);
+    }
+
     try {
-      if (!isAxiosError<APIErrorResponse>(e)) {
-        throw e;
-      }
-
-      const prevReq = e.config;
-
-      if (prevReq === undefined) {
-        throw e;
-      }
-
-      if (e.response?.status !== 401) {
-        if (
-          prevReq.url === apiUrls.refreshToken() &&
-          e.response?.status === 422
-        ) {
-          // window.location.href = urls.login(id as string)
-          return;
-        }
-        throw e;
-      }
-
-      if (prevReq.url === apiUrls.logout()) {
-        throw e;
-      }
-
-      // if (prevReq.url === apiUrls.refreshToken()) {
-      //   await forceLogout(id as string)
-      //   return
-      // }
-      if (prevReq.url === apiUrls.login()) {
-        throw e;
-      }
-
-      await fetchToken();
-
-      const accessToken = localStorage.getItem(ACCESS_TOKEN);
-
-      prevReq.headers.Authorization = `Bearer ${accessToken}`;
-
+      const newAccessToken = await fetchToken();
+      prevReq.headers.Authorization = `Bearer ${newAccessToken}`;
       return axios(prevReq);
-    } catch (e) {
-      throw e;
+    } catch (refreshError) {
+      return Promise.reject(refreshError);
     }
   },
 );
